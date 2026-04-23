@@ -29,5 +29,78 @@
 </head>
 <body>
   <h1>Sales Coach App</h1>
+  <script>
+    async function startSystemAudioCapture() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        console.error('getDisplayMedia is not available in this environment.');
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+        });
+
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          console.error('No loopback audio track received.');
+          return;
+        }
+
+        console.log('System audio capture started.');
+        console.log(
+          'Audio track settings:',
+          JSON.stringify(audioTracks[0].getSettings())
+        );
+
+        const audioContext = new AudioContext();
+        window.audioContext = audioContext;
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        const source = audioContext.createMediaStreamSource(
+          new MediaStream([audioTracks[0]])
+        );
+
+        // ScriptProcessorNode is deprecated but useful here for a quick, simple test.
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        let chunkCount = 0;
+
+        processor.onaudioprocess = (event) => {
+          const input = event.inputBuffer.getChannelData(0);
+          chunkCount += 1;
+
+          // Log a small slice so we can confirm real samples are arriving.
+          if (chunkCount % 20 === 0) {
+            const samplePreview = Array.from(input.slice(0, 8)).map((n) =>
+              Number(n.toFixed(6))
+            );
+            console.log(
+              `Audio chunk ${chunkCount} length=${input.length} samples=${samplePreview.join(
+                ','
+              )}`
+            );
+          }
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+      } catch (error) {
+        console.error('Failed to start system audio capture:', error);
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      startSystemAudioCapture();
+    });
+
+    window.addEventListener('click', () => {
+      // If autoplay policy suspended the context, a click will usually resume it.
+      if (window.audioContext && window.audioContext.state === 'suspended') {
+        window.audioContext.resume();
+      }
+    });
+  </script>
 </body>
 </html>
