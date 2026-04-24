@@ -25,11 +25,86 @@
       font-size: 2rem;
       font-weight: 600;
     }
+
+    #rebuttal-box {
+      display: none;
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1a1a2e;
+      color: #ffffff;
+      padding: 16px 24px;
+      border-radius: 8px;
+      max-width: 600px;
+      font-size: 1rem;
+      line-height: 1.5;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      z-index: 9999;
+    }
+
+    #rebuttal-box .label {
+      font-size: 0.75rem;
+      color: #888;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
   </style>
 </head>
 <body>
   <h1>Sales Coach App</h1>
+  <div id="rebuttal-box">
+    <div class="label">Suggested rebuttal</div>
+    <div id="rebuttal-text"></div>
+  </div>
   <script>
+    const { ipcRenderer } = require('electron');
+
+    function downsampleBuffer(input, inputSampleRate, outputSampleRate) {
+      if (outputSampleRate >= inputSampleRate) {
+        return input;
+      }
+
+      const ratio = inputSampleRate / outputSampleRate;
+      const newLength = Math.round(input.length / ratio);
+      const result = new Float32Array(newLength);
+      let offsetResult = 0;
+      let offsetBuffer = 0;
+
+      while (offsetResult < result.length) {
+        const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+        let accum = 0;
+        let count = 0;
+
+        for (
+          let i = offsetBuffer;
+          i < nextOffsetBuffer && i < input.length;
+          i += 1
+        ) {
+          accum += input[i];
+          count += 1;
+        }
+
+        result[offsetResult] = count > 0 ? accum / count : 0;
+        offsetResult += 1;
+        offsetBuffer = nextOffsetBuffer;
+      }
+
+      return result;
+    }
+
+    function float32ToInt16Bytes(float32Array) {
+      const int16Array = new Int16Array(float32Array.length);
+
+      for (let i = 0; i < float32Array.length; i += 1) {
+        const s = Math.max(-1, Math.min(1, float32Array[i]));
+        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+
+      return new Uint8Array(int16Array.buffer);
+    }
+
     async function startSystemAudioCapture() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
         console.error('getDisplayMedia is not available in this environment.');
@@ -63,15 +138,24 @@
           new MediaStream([audioTracks[0]])
         );
 
-        // ScriptProcessorNode is deprecated but useful here for a quick, simple test.
         const processor = audioContext.createScriptProcessor(4096, 1, 1);
         let chunkCount = 0;
+        const targetSampleRate = 16000;
+
+        ipcRenderer.send('deepgram:start');
 
         processor.onaudioprocess = (event) => {
           const input = event.inputBuffer.getChannelData(0);
           chunkCount += 1;
 
-          // Log a small slice so we can confirm real samples are arriving.
+          const downsampled = downsampleBuffer(
+            input,
+            audioContext.sampleRate,
+            targetSampleRate
+          );
+          const pcmBytes = float32ToInt16Bytes(downsampled);
+          ipcRenderer.send('deepgram:audio', pcmBytes);
+
           if (chunkCount % 20 === 0) {
             const samplePreview = Array.from(input.slice(0, 8)).map((n) =>
               Number(n.toFixed(6))
@@ -91,15 +175,36 @@
       }
     }
 
+    ipcRenderer.on('deepgram-transcript', (_event, text) => {
+      console.log(`Transcript: ${text}`);
+    });
+
+    ipcRenderer.on('objection-detected', (_event, data) => {
+      console.log('[IPC] Received objection-detected payload:', JSON.stringify(data));
+      const box = document.getElementById('rebuttal-box');
+      const text = document.getElementById('rebuttal-text');
+      if (!box || !text) {
+        console.error('[IPC] Rebuttal UI elements not found in DOM.');
+        return;
+      }
+      text.textContent = data.rebuttal;
+      box.style.display = 'block';
+      setTimeout(() => { box.style.display = 'none'; }, 8000);
+    });
+
     window.addEventListener('DOMContentLoaded', () => {
+      ipcRenderer.send('renderer-ready');
       startSystemAudioCapture();
     });
 
     window.addEventListener('click', () => {
-      // If autoplay policy suspended the context, a click will usually resume it.
       if (window.audioContext && window.audioContext.state === 'suspended') {
         window.audioContext.resume();
       }
+    });
+
+    window.addEventListener('beforeunload', () => {
+      ipcRenderer.send('deepgram:stop');
     });
   </script>
 </body>
