@@ -50,6 +50,19 @@
       text-transform: uppercase;
       letter-spacing: 1px;
     }
+
+    #rebuttal-status {
+      margin-top: 10px;
+      color: #4ade80;
+      font-size: 0.95rem;
+      display: none;
+    }
+
+    #rebuttal-dismiss-hint {
+      margin-top: 8px;
+      font-size: 0.78rem;
+      color: #9ca3af;
+    }
   </style>
 </head>
 <body>
@@ -57,9 +70,51 @@
   <div id="rebuttal-box">
     <div class="label">Suggested rebuttal</div>
     <div id="rebuttal-text"></div>
+    <div id="rebuttal-status">✓ Read out</div>
+    <div id="rebuttal-dismiss-hint">Press Esc to dismiss</div>
   </div>
   <script>
     const { ipcRenderer } = require('electron');
+    let awaitingSpeaker0Readout = false;
+
+    function toWordSet(text) {
+      const normalizedWords = (text || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean);
+      return new Set(normalizedWords);
+    }
+
+    function hasSignificantWordOverlap(rebuttalText, speakerText) {
+      const rebuttalWords = toWordSet(rebuttalText);
+      const speakerWords = toWordSet(speakerText);
+      if (rebuttalWords.size === 0) {
+        return false;
+      }
+
+      let overlapCount = 0;
+      for (const word of rebuttalWords) {
+        if (speakerWords.has(word)) {
+          overlapCount += 1;
+        }
+      }
+
+      const overlapRatio = overlapCount / rebuttalWords.size;
+      return overlapRatio >= 0.4;
+    }
+
+    function hideRebuttalBox() {
+      const box = document.getElementById('rebuttal-box');
+      const status = document.getElementById('rebuttal-status');
+      if (!box || !status) {
+        return;
+      }
+
+      box.style.display = 'none';
+      status.style.display = 'none';
+      awaitingSpeaker0Readout = false;
+    }
 
     function downsampleBuffer(input, inputSampleRate, outputSampleRate) {
       if (outputSampleRate >= inputSampleRate) {
@@ -112,21 +167,40 @@
       }
 
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
+        const loopbackStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: true,
         });
 
-        const audioTracks = stream.getAudioTracks();
-        if (audioTracks.length === 0) {
+        const loopbackTracks = loopbackStream.getAudioTracks();
+        if (loopbackTracks.length === 0) {
           console.error('No loopback audio track received.');
           return;
         }
 
-        console.log('System audio capture started.');
+        const micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+          video: false,
+        });
+
+        const micTracks = micStream.getAudioTracks();
+        if (micTracks.length === 0) {
+          console.error('No microphone audio track received.');
+          return;
+        }
+
+        console.log('System loopback + microphone capture started.');
         console.log(
-          'Audio track settings:',
-          JSON.stringify(audioTracks[0].getSettings())
+          'Loopback settings:',
+          JSON.stringify(loopbackTracks[0].getSettings())
+        );
+        console.log(
+          'Microphone settings:',
+          JSON.stringify(micTracks[0].getSettings())
         );
 
         const audioContext = new AudioContext();
@@ -134,8 +208,19 @@
         if (audioContext.state === 'suspended') {
           await audioContext.resume();
         }
-        const source = audioContext.createMediaStreamSource(
-          new MediaStream([audioTracks[0]])
+
+        const loopbackSource = audioContext.createMediaStreamSource(
+          new MediaStream([loopbackTracks[0]])
+        );
+        const micSource = audioContext.createMediaStreamSource(
+          new MediaStream([micTracks[0]])
+        );
+        const mixedDestination = audioContext.createMediaStreamDestination();
+        loopbackSource.connect(mixedDestination);
+        micSource.connect(mixedDestination);
+
+        const mixedSource = audioContext.createMediaStreamSource(
+          mixedDestination.stream
         );
 
         const processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -168,28 +253,64 @@
           }
         };
 
-        source.connect(processor);
+        mixedSource.connect(processor);
         processor.connect(audioContext.destination);
       } catch (error) {
         console.error('Failed to start system audio capture:', error);
       }
     }
 
-    ipcRenderer.on('deepgram-transcript', (_event, text) => {
-      console.log(`Transcript: ${text}`);
+    ipcRenderer.on('deepgram-transcript', (_event, payload) => {
+      const text =
+        typeof payload === 'string' ? payload : payload?.text || '';
+      const speaker =
+        typeof payload === 'object' && payload !== null
+          ? payload.speaker
+          : null;
+      const speakerLabel =
+        typeof speaker === 'number' ? `Speaker ${speaker}` : 'Speaker ?';
+      console.log(`Transcript (${speakerLabel}): ${text}`);
     });
 
     ipcRenderer.on('objection-detected', (_event, data) => {
       console.log('[IPC] Received objection-detected payload:', JSON.stringify(data));
       const box = document.getElementById('rebuttal-box');
       const text = document.getElementById('rebuttal-text');
-      if (!box || !text) {
+      const status = document.getElementById('rebuttal-status');
+      if (!box || !text || !status) {
         console.error('[IPC] Rebuttal UI elements not found in DOM.');
         return;
       }
+
+      awaitingSpeaker0Readout = true;
       text.textContent = data.rebuttal;
+      status.style.display = 'none';
       box.style.display = 'block';
-      setTimeout(() => { box.style.display = 'none'; }, 8000);
+    });
+
+    ipcRenderer.on('speaker-transcript-final', (_event, payload) => {
+      if (!awaitingSpeaker0Readout) {
+        return;
+      }
+
+      if (payload?.speaker !== 0) {
+        return;
+      }
+
+      const rebuttalText = document.getElementById('rebuttal-text')?.textContent || '';
+      const speakerText = payload?.text || '';
+      if (!hasSignificantWordOverlap(rebuttalText, speakerText)) {
+        return;
+      }
+
+      const box = document.getElementById('rebuttal-box');
+      const status = document.getElementById('rebuttal-status');
+      if (!box || !status || box.style.display === 'none') {
+        return;
+      }
+
+      status.style.display = 'block';
+      awaitingSpeaker0Readout = false;
     });
 
     window.addEventListener('DOMContentLoaded', () => {
@@ -200,6 +321,12 @@
     window.addEventListener('click', () => {
       if (window.audioContext && window.audioContext.state === 'suspended') {
         window.audioContext.resume();
+      }
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        hideRebuttalBox();
       }
     });
 
