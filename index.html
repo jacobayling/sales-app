@@ -76,32 +76,33 @@
   <script>
     const { ipcRenderer } = require('electron');
     let awaitingSpeaker0Readout = false;
+    let postCheckmarkHideTimer = null;
 
-    function toWordSet(text) {
-      const normalizedWords = (text || '')
+    function tokenize(text) {
+      return (text || '')
         .toLowerCase()
         .replace(/[^a-z0-9\s]/g, ' ')
         .split(/\s+/)
         .filter(Boolean);
-      return new Set(normalizedWords);
     }
 
-    function hasSignificantWordOverlap(rebuttalText, speakerText) {
-      const rebuttalWords = toWordSet(rebuttalText);
-      const speakerWords = toWordSet(speakerText);
-      if (rebuttalWords.size === 0) {
+    function getLastFourWordsPhrase(text) {
+      const words = tokenize(text);
+      if (words.length === 0) {
+        return '';
+      }
+
+      return words.slice(-4).join(' ');
+    }
+
+    function containsOrderedPhrase(speakerText, phrase) {
+      const transcriptWords = tokenize(speakerText);
+      if (transcriptWords.length === 0 || !phrase) {
         return false;
       }
 
-      let overlapCount = 0;
-      for (const word of rebuttalWords) {
-        if (speakerWords.has(word)) {
-          overlapCount += 1;
-        }
-      }
-
-      const overlapRatio = overlapCount / rebuttalWords.size;
-      return overlapRatio >= 0.4;
+      const transcript = transcriptWords.join(' ');
+      return transcript.includes(phrase);
     }
 
     function hideRebuttalBox() {
@@ -114,6 +115,10 @@
       box.style.display = 'none';
       status.style.display = 'none';
       awaitingSpeaker0Readout = false;
+      if (postCheckmarkHideTimer) {
+        clearTimeout(postCheckmarkHideTimer);
+        postCheckmarkHideTimer = null;
+      }
     }
 
     function downsampleBuffer(input, inputSampleRate, outputSampleRate) {
@@ -286,6 +291,10 @@
       text.textContent = data.rebuttal;
       status.style.display = 'none';
       box.style.display = 'block';
+      if (postCheckmarkHideTimer) {
+        clearTimeout(postCheckmarkHideTimer);
+        postCheckmarkHideTimer = null;
+      }
     });
 
     ipcRenderer.on('speaker-transcript-final', (_event, payload) => {
@@ -299,7 +308,8 @@
 
       const rebuttalText = document.getElementById('rebuttal-text')?.textContent || '';
       const speakerText = payload?.text || '';
-      if (!hasSignificantWordOverlap(rebuttalText, speakerText)) {
+      const lastFourWordsPhrase = getLastFourWordsPhrase(rebuttalText);
+      if (!containsOrderedPhrase(speakerText, lastFourWordsPhrase)) {
         return;
       }
 
@@ -311,6 +321,9 @@
 
       status.style.display = 'block';
       awaitingSpeaker0Readout = false;
+      postCheckmarkHideTimer = setTimeout(() => {
+        hideRebuttalBox();
+      }, 1000);
     });
 
     window.addEventListener('DOMContentLoaded', () => {
