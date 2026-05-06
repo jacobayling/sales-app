@@ -89,6 +89,9 @@ async function getObjectionSuggestionFromClaude(transcriptText, contextEntries) 
 
   const prompt = [
     'You are a sales call assistant.',
+    'All responses must use British English vernacular and phrasing suitable for a UK audience.',
+    'Use a professional but conversational tone appropriate for a UK-based FX sales environment.',
+    'Avoid American spellings and expressions.',
     'Use the recent conversation context to interpret references and follow-up questions.',
     'Analyze the following prospect sentence and classify it.',
     'Return ONLY raw valid JSON with no markdown, no code fences, and no other text.',
